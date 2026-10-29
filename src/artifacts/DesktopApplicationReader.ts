@@ -30,7 +30,7 @@ import { projectDesktopApplication } from "../domain/desktopApplicationProjectio
 import { digestCanonicalValue } from "../domain/canonicalDigest.js";
 import { err, ok } from "../domain/result.js";
 import { createDesktopApplicationEvidence } from "../domain/desktopApplicationEvidence.js";
-import { ARTIFACT_GRAPH_PROVIDER } from "../application/InvestigationProviders.js";
+import { ARTIFACT_GRAPH_PROVIDER } from "../domain/investigationProviders.js";
 import {
   AnalysisResourceConstraintError,
   AnalysisUnsupportedTargetError,
@@ -476,6 +476,6 @@ const addPathFacts = (row: DesktopFile): string | null => {
 
 const probeSelected = (entry: DirectoryArtifactEntry): boolean =>
   entry.executable ||
-  /(?:\.(?:exe|dll|so|dylib|pck|utoc)|(?:^|\/)(?:global-metadata\.dat|data\.win|game\.(?:unx|ios)))$/iu.test(
+  /(?:\.(?:exe|dll|so|dylib|pck|utoc|bundle|ab|unity3d)|(?:^|\/)(?:global-metadata\.dat|data\.win|game\.(?:unx|ios)))$/iu.test(
     entry.path,
   );
