@@ -1,6 +1,6 @@
 import { Script } from "node:vm";
 import { describe, expect, it } from "vitest";
-import { analyzeJavaScriptStaticSource } from "./javascriptStaticAnalysis.js";
+import { analyzeJavaScriptStaticSource } from "../../../tests/fixtures/javascriptStaticAnalysis.js";
 
 it("retains switch selection on a direct bridge exposure", () => {
   const result = analyzeJavaScriptStaticSource(`
@@ -184,6 +184,36 @@ it("does not invent a selection predicate for dynamic case expressions", () => {
   expect(result.parse_status).toBe("partial");
 });
 
+it("retains switch selection for a non-finite numeric case", () => {
+  const result = analyzeJavaScriptStaticSource(`
+    const { contextBridge, ipcRenderer } = require("electron");
+    switch (process.argv.length) {
+      case 1e309:
+        contextBridge.exposeInMainWorld("api", { ping: () => ipcRenderer.invoke("ping") });
+    }
+  `);
+  expect(result.electron.call_paths?.[0]?.conditions).toEqual([
+    expect.objectContaining({
+      expression: "((process.argv.length) === (1e309))",
+    }),
+  ]);
+});
+
+it("retains switch selection for an exact template case", () => {
+  const result = analyzeJavaScriptStaticSource(`
+    const { contextBridge, ipcRenderer } = require("electron");
+    switch (process.platform) {
+      case \`win32\`:
+        contextBridge.exposeInMainWorld("api", { ping: () => ipcRenderer.invoke("ping") });
+    }
+  `);
+  expect(result.electron.call_paths?.[0]?.conditions).toEqual([
+    expect.objectContaining({
+      expression: "((process.platform) === (`win32`))",
+    }),
+  ]);
+});
+
 it("retains the continuing predicate after a break to an enclosing label", () => {
   const result = analyzeJavaScriptStaticSource(`const e=require("electron");
     guard: {
@@ -233,8 +263,8 @@ it("preserves every direct observation in a long flat sibling block", () => {
   expect(result.electron.ipc.map(({ channel }) => channel)).toEqual(channels);
   expect(result.electron.call_paths ?? []).toEqual([]);
   expect(result.parse_status).toBe("partial");
-  expect(result.analysis_coverage?.syntax.status).toBe("complete");
-  expect(result.analysis_coverage?.semantics.unknown_findings).toBeGreaterThan(
+  expect(result.analysis_coverage.syntax.status).toBe("complete");
+  expect(result.analysis_coverage.semantics.unknown_findings).toBeGreaterThan(
     0,
   );
 });
@@ -460,8 +490,8 @@ it("preserves an observed empty contextBridge API object", () => {
     "resolution_basis",
   );
   expect(result.parse_status).toBe("partial");
-  expect(result.analysis_coverage?.syntax.status).toBe("complete");
-  expect(result.analysis_coverage?.semantics.unknown_findings).toBeGreaterThan(
+  expect(result.analysis_coverage.syntax.status).toBe("complete");
+  expect(result.analysis_coverage.semantics.unknown_findings).toBeGreaterThan(
     0,
   );
 });
@@ -592,6 +622,16 @@ describe("contextBridge helper invocations", () => {
     const { apis } = exposures(`
       function expose(key) { contextBridge.exposeInMainWorld(key, { ping() {} }); }
       expose("one"); expose("two");`);
+    expect(apis).toEqual([
+      { api_key: "one", ...literalKey, members: ["ping"], unknown_members: 0 },
+      { api_key: "two", ...literalKey, members: ["ping"], unknown_members: 0 },
+    ]);
+  });
+
+  it("binds an exact template key like a quoted key", () => {
+    const { apis } = exposures(`
+      function expose(key) { contextBridge.exposeInMainWorld(key, { ping() {} }); }
+      expose(\`one\`); expose("two");`);
     expect(apis).toEqual([
       { api_key: "one", ...literalKey, members: ["ping"], unknown_members: 0 },
       { api_key: "two", ...literalKey, members: ["ping"], unknown_members: 0 },
@@ -887,8 +927,8 @@ it("resolves a site-determined constant channel in place of its dynamic observat
   );
   // The syntax pass's unknown channel is resolved, not left as partial.
   expect(result.parse_status).toBe("partial");
-  expect(result.analysis_coverage?.syntax.status).toBe("complete");
-  expect(result.analysis_coverage?.semantics.unknown_findings).toBeGreaterThan(
+  expect(result.analysis_coverage.syntax.status).toBe("complete");
+  expect(result.analysis_coverage.semantics.unknown_findings).toBeGreaterThan(
     0,
   );
 });
@@ -908,8 +948,8 @@ it("resolves a site-determined registration whose handler is a named local", () 
     }),
   ]);
   expect(result.parse_status).toBe("partial");
-  expect(result.analysis_coverage?.syntax.status).toBe("complete");
-  expect(result.analysis_coverage?.semantics.unknown_findings).toBeGreaterThan(
+  expect(result.analysis_coverage.syntax.status).toBe("complete");
+  expect(result.analysis_coverage.semantics.unknown_findings).toBeGreaterThan(
     0,
   );
 });
@@ -931,6 +971,75 @@ it("keeps an argument-supplied channel unresolved beside its resolved candidates
     new Set(sends.map(({ location }) => JSON.stringify(location))).size,
   ).toBe(1);
 });
+it.each([
+  ["every invocation is exact", "", "literal"],
+  [
+    "another invocation has a substitution",
+    "register(`app:${suffix}`, () => 3);",
+    null,
+  ],
+] as const)(
+  "substitutes every exact spelling of a wrapper channel when %s",
+  (_, extra, invocationChannels) => {
+    const result = analyzeJavaScriptStaticSource(`
+      const { ipcMain } = require("electron");
+      function register(channel, handler) { ipcMain.handle(channel, handler); }
+      register("app:quoted", () => 1);
+      register(\`app:template\`, () => 2);
+      register("app:typed" as const, () => 4);
+      ${extra}
+    `);
+    // Quoted, template and type-asserted spellings are one exact channel. A
+    // template with a substitution stays dynamic, so the wrapper's own site
+    // may still receive a channel no traced invocation supplied.
+    expect(
+      result.electron.ipc.map((finding) => [
+        finding.channel,
+        finding.channel_expression,
+        finding.resolution_basis ?? "direct",
+        finding.channel === null ? (finding.invocation_channels ?? null) : null,
+      ]),
+    ).toEqual([
+      [null, "channel", "direct", invocationChannels],
+      ["app:quoted", null, "wrapper-substitution", null],
+      ["app:template", null, "wrapper-substitution", null],
+      ["app:typed", null, "wrapper-substitution", null],
+    ]);
+  },
+);
+it.each([
+  [
+    "a direct handler's channel",
+    "e.ipcMain.on(`app:copy`, event => event.sender.copy());",
+    {
+      entry_kind: "ipc-handler",
+      entry: "app:copy",
+      channel: "app:copy",
+      terminal: "ipc-event.sender.copy",
+    },
+  ],
+  [
+    "a contextBridge key",
+    'e.contextBridge.exposeInMainWorld(`desktop`, { ping: () => e.ipcRenderer.invoke("app:ping") });',
+    {
+      entry_kind: "bridge-member",
+      entry: "desktop.ping",
+      channel: "app:ping",
+      terminal: "electron.ipcRenderer.invoke",
+    },
+  ],
+])(
+  "traces call paths from %s spelled as an exact template",
+  (_, source, path) => {
+    const result = analyzeJavaScriptStaticSource(`
+    const e = require("electron");
+    ${source}
+  `);
+    expect(result.electron.call_paths ?? []).toContainEqual(
+      expect.objectContaining(path),
+    );
+  },
+);
 it.each([
   [
     "an exposed member",
@@ -1115,10 +1224,10 @@ it.each(["interface Shape { marker(): void }", "type Shape = typeof marker;"])(
         ]),
     ).toEqual([["ch", "wrapper-substitution"]]);
     expect(result.parse_status).toBe("partial");
-    expect(result.analysis_coverage?.syntax.status).toBe("complete");
-    expect(
-      result.analysis_coverage?.semantics.unknown_findings,
-    ).toBeGreaterThan(0);
+    expect(result.analysis_coverage.syntax.status).toBe("complete");
+    expect(result.analysis_coverage.semantics.unknown_findings).toBeGreaterThan(
+      0,
+    );
   },
 );
 it("resolves a handler a module-level factory call created once in place", () => {
@@ -1137,8 +1246,8 @@ it("resolves a handler a module-level factory call created once in place", () =>
     ]),
   ).toEqual([["ch", "wrapper-substitution"]]);
   expect(result.parse_status).toBe("partial");
-  expect(result.analysis_coverage?.syntax.status).toBe("complete");
-  expect(result.analysis_coverage?.semantics.unknown_findings).toBeGreaterThan(
+  expect(result.analysis_coverage.syntax.status).toBe("complete");
+  expect(result.analysis_coverage.semantics.unknown_findings).toBeGreaterThan(
     0,
   );
 });
@@ -1199,8 +1308,8 @@ it("resolves a module-level handler in place when the entry binds an unused para
     }),
   ]);
   expect(result.parse_status).toBe("partial");
-  expect(result.analysis_coverage?.syntax.status).toBe("complete");
-  expect(result.analysis_coverage?.semantics.unknown_findings).toBeGreaterThan(
+  expect(result.analysis_coverage.syntax.status).toBe("complete");
+  expect(result.analysis_coverage.semantics.unknown_findings).toBeGreaterThan(
     0,
   );
 });
